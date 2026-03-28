@@ -103,23 +103,26 @@ class MarketEngine:
     async def fetch_ticker(self) -> dict:
         try:
             async with aiohttp.ClientSession() as session:
+                # Prix simple
                 async with session.get(
-                    "https://api.binance.com/api/v3/ticker/24hr",
+                    "https://api.binance.com/api/v3/ticker/price",
                     params={"symbol": "ETHUSDT"},
                     timeout=aiohttp.ClientTimeout(total=8)
                 ) as r:
-                    data = await r.json()
-                    price  = float(data["lastPrice"])
-                    volume = float(data["volume"])
+                    data  = await r.json()
+                    price = float(data["price"])
 
+                # Volume via klines
+                volume = 0.0
                 async with session.get(
                     "https://api.binance.com/api/v3/klines",
                     params={"symbol": "ETHUSDT", "interval": "1m", "limit": 2},
                     timeout=aiohttp.ClientTimeout(total=8)
                 ) as kr:
                     klines = await kr.json()
-                    if klines:
-                        self.volume_history.append(float(klines[-1][5]))
+                    if klines and isinstance(klines, list) and len(klines) > 0:
+                        volume = float(klines[-1][5])
+                        self.volume_history.append(volume)
 
                 self.current_price  = price
                 self.current_volume = volume
@@ -417,18 +420,24 @@ class NewsFetcher:
         try:
             async with aiohttp.ClientSession() as session:
                 async with session.get(
-                    "https://newsdata.io/api/1/news",
-                    params={"apikey": NEWSDATA_KEY, "q": "ethereum OR ETH OR crypto", "language": "en,fr", "sentiment": "all"},
+                    "https://newsdata.io/api/1/latest",
+                    params={"apikey": NEWSDATA_KEY, "q": "ethereum OR ETH OR crypto", "language": "en,fr"},
                     timeout=aiohttp.ClientTimeout(total=10)
                 ) as r:
                     data = await r.json()
                     items = []
-                    for a in data.get("results", [])[:20]:
-                        api_sent = a.get("sentiment", "neutral")
+                    results = data.get("results") or []
+                    for a in results[:20]:
+                        if not isinstance(a, dict): continue
+                        title = a.get("title") or ""
+                        if not title: continue
+                        api_sent = a.get("sentiment") or "neutral"
                         items.append({
-                            "id": f"nd_{hashlib.md5(a.get('title','').encode()).hexdigest()[:12]}",
-                            "title": a.get("title", ""), "source": a.get("source_id", "NewsData"),
-                            "source_type": "newsdata", "url": a.get("link", ""),
+                            "id": f"nd_{hashlib.md5(title.encode()).hexdigest()[:12]}",
+                            "title": title,
+                            "source": a.get("source_id") or "NewsData",
+                            "source_type": "newsdata",
+                            "url": a.get("link") or "",
                             "api_sentiment": api_sent,
                             "api_sentiment_score": 0.6 if api_sent == "positive" else -0.6 if api_sent == "negative" else 0.0,
                         })
