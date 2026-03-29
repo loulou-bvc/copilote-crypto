@@ -7,23 +7,107 @@ const USDC_ARB = "0xaf88d065e77c8cC2239327C5EDb3A432268e5831";
 const uniLink = (from, to, amt) =>
   `https://app.uniswap.org/#/swap?inputCurrency=${from}&outputCurrency=${to}&exactAmount=${amt}&exactField=input&chain=arbitrum`;
 
-// ─── PRICE SIM ────────────────────────────────────────────────────────────────
-let _m = 0, _p = 0;
-function nextSim(p) {
-  if (Math.random() < 0.04) _p = (Math.random() < 0.45 ? -1 : 1) * (0.025 + Math.random() * 0.055);
-  else _p *= 0.65;
-  _m = _m * 0.93 + (Math.random() - 0.5) * 0.003;
-  return +(p * (1 + _m + (Math.random() - 0.5) * 0.007 + _p)).toFixed(2);
+// ─── BINANCE PRICE (WebSocket temps réel + REST fallback) ─────────────────────
+function useBinancePrice() {
+  const [price, setPrice]       = useState(null);
+  const [change24h, setChange24h] = useState(0);
+  const [high24h, setHigh24h]   = useState(null);
+  const [low24h, setLow24h]     = useState(null);
+  const [vol24h, setVol24h]     = useState(null);
+  const [connected, setConnected] = useState(false);
+  const wsRef = useRef(null);
+  const retryRef = useRef(null);
+
+  useEffect(() => {
+    let alive = true;
+
+    const restFallback = async () => {
+      try {
+        const r = await fetch("https://api.binance.com/api/v3/ticker/24hr?symbol=ETHUSDT");
+        const d = await r.json();
+        if (!alive) return;
+        setPrice(parseFloat(d.lastPrice));
+        setChange24h(parseFloat(d.priceChangePercent));
+        setHigh24h(parseFloat(d.highPrice));
+        setLow24h(parseFloat(d.lowPrice));
+        setVol24h(parseFloat(d.quoteVolume));
+      } catch { /* silencieux */ }
+    };
+
+    const connect = () => {
+      try {
+        const ws = new WebSocket("wss://stream.binance.com:9443/ws/ethusdt@ticker");
+        wsRef.current = ws;
+
+        ws.onopen = () => { if (alive) setConnected(true); };
+
+        ws.onmessage = (e) => {
+          if (!alive) return;
+          const d = JSON.parse(e.data);
+          setPrice(parseFloat(d.c));
+          setChange24h(parseFloat(d.P));
+          setHigh24h(parseFloat(d.h));
+          setLow24h(parseFloat(d.l));
+          setVol24h(parseFloat(d.q));
+        };
+
+        ws.onclose = () => {
+          if (!alive) return;
+          setConnected(false);
+          // Reconnect après 3s
+          retryRef.current = setTimeout(connect, 3000);
+        };
+
+        ws.onerror = () => {
+          ws.close();
+          restFallback();
+        };
+      } catch {
+        restFallback();
+      }
+    };
+
+    // Charge les données REST immédiatement, puis ouvre le WS
+    restFallback();
+    connect();
+
+    return () => {
+      alive = false;
+      clearTimeout(retryRef.current);
+      wsRef.current?.close();
+    };
+  }, []);
+
+  return { price, change24h, high24h, low24h, vol24h, connected };
+}
+
+// ─── BINANCE KLINES (vraies bougies pour le graphique) ───────────────────────
+function useKlines(interval = "5m", limit = 60) {
+  const [closes, setCloses] = useState([]);
+
+  useEffect(() => {
+    const load = async () => {
+      try {
+        const r = await fetch(`https://api.binance.com/api/v3/klines?symbol=ETHUSDT&interval=${interval}&limit=${limit}`);
+        const data = await r.json();
+        setCloses(data.map(k => parseFloat(k[4]))); // close price
+      } catch { /* silencieux */ }
+    };
+    load();
+    const iv = setInterval(load, 5 * 60 * 1000); // re-fetch toutes les 5min
+    return () => clearInterval(iv);
+  }, [interval, limit]);
+
+  return closes;
 }
 
 // ─── HOOKS ────────────────────────────────────────────────────────────────────
 function useBackend() {
   const [backendOk, setBackendOk] = useState(false);
-  const [ethPrice, setEthPrice] = useState(null);
-  const [news, setNews] = useState([]);
-  const [signals, setSignals] = useState([]);
-  const [stats, setStats] = useState({});
-  const [volRatio, setVolRatio] = useState(1);
+  const [news, setNews]           = useState([]);
+  const [signals, setSignals]     = useState([]);
+  const [stats, setStats]         = useState({});
+  const [volRatio, setVolRatio]   = useState(1);
 
   const poll = useCallback(async () => {
     try {
@@ -33,10 +117,12 @@ function useBackend() {
         fetch(`${BACKEND}/api/signals`).then(r => r.json()),
         fetch(`${BACKEND}/api/stats`).then(r => r.json()),
       ]);
+      // On utilise le backend juste pour volRatio + news + signals
       if (priceRes.status === "fulfilled" && priceRes.value?.price) {
-        setEthPrice(priceRes.value.price);
         setVolRatio(priceRes.value.volume_ratio || 1);
         setBackendOk(true);
+      } else {
+        setBackendOk(false);
       }
       if (newsRes.status === "fulfilled" && Array.isArray(newsRes.value)) setNews(newsRes.value);
       if (sigRes.status === "fulfilled" && Array.isArray(sigRes.value)) setSignals(sigRes.value);
@@ -45,7 +131,7 @@ function useBackend() {
   }, []);
 
   useEffect(() => { poll(); const iv = setInterval(poll, 20000); return () => clearInterval(iv); }, [poll]);
-  return { backendOk, ethPrice, news, signals, stats, volRatio };
+  return { backendOk, news, signals, stats, volRatio };
 }
 
 function useWalletBalance(walletAddress) {
@@ -381,26 +467,37 @@ function NewsFeed({ news, signals }) {
 export default function App() {
   const { ready, authenticated, user, logout } = usePrivy();
   const { wallets } = useWallets();
-  const { backendOk, ethPrice, news, signals, stats, volRatio } = useBackend();
+  const { backendOk, news, signals, stats, volRatio } = useBackend();
+
+  // Prix Binance en temps réel (WebSocket)
+  const { price: binancePrice, change24h, high24h, low24h, vol24h, connected: wsOk } = useBinancePrice();
+  // Historique des close prices (vraies bougies 5m)
+  const klines = useKlines("5m", 60);
+
+  // Historique local enrichi par le WS
+  const [priceHistory, setPriceHistory] = useState([]);
+  useEffect(() => {
+    if (klines.length > 0) {
+      setPriceHistory(klines);
+    }
+  }, [klines]);
+  useEffect(() => {
+    if (binancePrice) {
+      setPriceHistory(h => {
+        const last = [...h.slice(-199), binancePrice];
+        return last;
+      });
+    }
+  }, [binancePrice]);
+
+  const cur = binancePrice || priceHistory[priceHistory.length - 1] || 0;
+  const chartData = priceHistory.length >= 2 ? priceHistory : null;
 
   const [page, setPage] = useState("home");
-  const [prices, setPrices] = useState(() =>
-    Array.from({ length: 40 }, () => +(2420 + (Math.random() - 0.5) * 80).toFixed(2))
-  );
   const [chatInput, setChatInput] = useState("");
   const [chatHistory, setChatHistory] = useState([]);
   const [chatLoading, setChatLoading] = useState(false);
   const chatRef = useRef(null);
-
-  const cur = ethPrice || prices[prices.length - 1];
-
-  useEffect(() => {
-    if (ethPrice) { setPrices(p => [...p.slice(-99), ethPrice]); }
-    else {
-      const iv = setInterval(() => setPrices(p => [...p.slice(-99), nextSim(p[p.length - 1])]), 3000);
-      return () => clearInterval(iv);
-    }
-  }, [ethPrice]);
 
   const userEmail = user?.email?.address || user?.google?.email || "";
   const userName = user?.google?.name || userEmail.split("@")[0] || "Trader";
@@ -419,7 +516,7 @@ export default function App() {
         body: JSON.stringify({
           model: "claude-sonnet-4-20250514",
           max_tokens: 400,
-          system: `Tu es le copilote crypto de ${userName}. Contexte: Prix ETH $${cur}, ${backendOk ? `${news.length} news analysées, ${signals.length} signaux récents` : "backend hors ligne"}. Réponds en français, concis, sans jargon.`,
+          system: `Tu es le copilote crypto de ${userName}. Contexte: Prix ETH $${cur.toFixed(2)}, variation 24h ${change24h > 0 ? "+" : ""}${change24h.toFixed(2)}%, ${backendOk ? `${news.length} news analysées, ${signals.length} signaux récents` : "backend hors ligne"}. Réponds en français, concis, sans jargon.`,
           messages: [...chatHistory, { role: "user", content: msg }],
         }),
       });
@@ -431,10 +528,9 @@ export default function App() {
       setChatHistory(h => [...h, { role: "assistant", content: "Erreur — vérifie ta connexion." }]);
     }
     setChatLoading(false);
-  }, [chatInput, chatLoading, chatHistory, userName, cur, backendOk, news, signals]);
+  }, [chatInput, chatLoading, chatHistory, userName, cur, change24h, backendOk, news, signals]);
 
-  const change = prices.length > 1 ? +((cur - prices[0]) / prices[0] * 100).toFixed(2) : 0;
-  const isUp = change >= 0;
+  const isUp = change24h >= 0;
   const chartColor = isUp ? "#34d399" : "#f87171";
 
   const nav = [
@@ -583,32 +679,37 @@ export default function App() {
 
               <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", position: "relative" }}>
                 <div>
-                  <div style={{ fontSize: 10, color: "#334155", letterSpacing: ".1em", textTransform: "uppercase", marginBottom: 12 }}>Prix ETH / USD</div>
+                  <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 12 }}>
+                    <span style={{ fontSize: 10, color: "#334155", letterSpacing: ".1em", textTransform: "uppercase" }}>ETH / USDT</span>
+                    <span style={{ display: "flex", alignItems: "center", gap: 5, padding: "2px 8px", borderRadius: 20, background: wsOk ? "rgba(52,211,153,.1)" : "rgba(251,191,36,.1)", border: `1px solid ${wsOk ? "rgba(52,211,153,.2)" : "rgba(251,191,36,.2)"}` }}>
+                      <span style={{ width: 5, height: 5, borderRadius: "50%", background: wsOk ? "#34d399" : "#fbbf24", animation: wsOk ? "livepulse 2s infinite" : "none", display: "inline-block" }} />
+                      <span style={{ fontSize: 9, color: wsOk ? "#34d399" : "#fbbf24", fontWeight: 700, letterSpacing: ".06em" }}>{wsOk ? "LIVE" : "REST"}</span>
+                    </span>
+                  </div>
                   <PriceNum value={cur} size={46} />
                   <div style={{ display: "flex", alignItems: "center", gap: 10, marginTop: 8 }}>
                     <span style={{ fontFamily: "'DM Mono', monospace", fontSize: 13, color: chartColor, fontWeight: 500 }}>
-                      {isUp ? "▲" : "▼"} {Math.abs(change)}%
+                      {isUp ? "▲" : "▼"} {Math.abs(change24h).toFixed(2)}%
                     </span>
-                    <span style={{ fontSize: 12, color: "#334155" }}>
-                      {backendOk ? "· Binance live" : "· Simulation locale"}
-                    </span>
+                    <span style={{ fontSize: 12, color: "#334155" }}>· 24h · Binance</span>
                   </div>
                 </div>
-                <div style={{ width: 200, paddingTop: 4 }}>
-                  <Spark data={prices.slice(-40)} color={chartColor} h={64} />
+                <div style={{ width: 220, paddingTop: 4 }}>
+                  <Spark data={chartData || []} color={chartColor} h={68} />
                 </div>
               </div>
 
-              <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 20, marginTop: 28, paddingTop: 24, borderTop: "1px solid #131f35" }}>
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(5, 1fr)", gap: 16, marginTop: 28, paddingTop: 24, borderTop: "1px solid #131f35" }}>
                 {[
-                  { l: "Volume spike", v: `${volRatio.toFixed(2)}×`, c: volRatio >= 2 ? "#f87171" : volRatio >= 1.5 ? "#fbbf24" : "#34d399" },
-                  { l: "News analysées", v: stats.news_analyzed ?? news.length, c: "#a5b4fc" },
-                  { l: "Signaux émis", v: stats.signals_total ?? signals.length, c: "#fbbf24" },
-                  { l: "Précision", v: stats.signal_accuracy != null ? `${stats.signal_accuracy}%` : "—", c: (stats.signal_accuracy || 0) >= 60 ? "#34d399" : "#94a3b8" },
+                  { l: "Plus haut 24h", v: high24h ? `$${high24h.toLocaleString("en-US", { maximumFractionDigits: 0 })}` : "—", c: "#34d399" },
+                  { l: "Plus bas 24h",  v: low24h  ? `$${low24h.toLocaleString("en-US",  { maximumFractionDigits: 0 })}` : "—", c: "#f87171" },
+                  { l: "Vol 24h (M$)",  v: vol24h  ? `${(vol24h / 1e6).toFixed(0)}M`  : "—", c: "#a5b4fc" },
+                  { l: "Signaux",       v: stats.signals_total ?? signals.length,            c: "#fbbf24" },
+                  { l: "Précision",     v: stats.signal_accuracy != null ? `${stats.signal_accuracy}%` : "—", c: (stats.signal_accuracy || 0) >= 60 ? "#34d399" : "#94a3b8" },
                 ].map(s => (
                   <div key={s.l}>
                     <div style={{ fontSize: 10, color: "#334155", letterSpacing: ".08em", textTransform: "uppercase", marginBottom: 6 }}>{s.l}</div>
-                    <div style={{ fontFamily: "'DM Mono', monospace", fontSize: 20, fontWeight: 500, color: s.c }}>{s.v}</div>
+                    <div style={{ fontFamily: "'DM Mono', monospace", fontSize: 16, fontWeight: 500, color: s.c }}>{s.v}</div>
                   </div>
                 ))}
               </div>
@@ -640,55 +741,66 @@ export default function App() {
         {/* ── MARCHÉ ─────────────────────────────────────────────────────── */}
         {page === "live" && (
           <div className="fadein">
-            <div style={{ marginBottom: 28 }}>
-              <h1 style={{ fontFamily: "'Syne',sans-serif", fontSize: 24, fontWeight: 900, color: "#f1f5f9", letterSpacing: "-.02em", marginBottom: 4 }}>Marché en direct</h1>
-              <p style={{ fontSize: 13, color: "#475569" }}>ETH/USDT · Arbitrum · {backendOk ? "Données Binance en temps réel" : "Simulation locale"}</p>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-end", marginBottom: 28 }}>
+              <div>
+                <h1 style={{ fontFamily: "'Syne',sans-serif", fontSize: 24, fontWeight: 900, color: "#f1f5f9", letterSpacing: "-.02em", marginBottom: 4 }}>Marché en direct</h1>
+                <p style={{ fontSize: 13, color: "#475569" }}>ETH/USDT · Bougies 5 min · Binance</p>
+              </div>
+              <div style={{ display: "flex", alignItems: "center", gap: 6, padding: "6px 12px", borderRadius: 20, background: wsOk ? "rgba(52,211,153,.08)" : "rgba(251,191,36,.08)", border: `1px solid ${wsOk ? "rgba(52,211,153,.2)" : "rgba(251,191,36,.2)"}` }}>
+                <span style={{ width: 6, height: 6, borderRadius: "50%", background: wsOk ? "#34d399" : "#fbbf24", display: "inline-block", animation: wsOk ? "livepulse 2s infinite" : "none" }} />
+                <span style={{ fontSize: 11, color: wsOk ? "#34d399" : "#fbbf24", fontWeight: 600 }}>{wsOk ? "WebSocket connecté" : "Polling REST"}</span>
+              </div>
             </div>
 
             {/* Main chart card */}
-            <div style={{ background: "#0c1220", border: "1px solid #1a2438", borderRadius: 20, padding: "24px 28px 20px", marginBottom: 16, boxShadow: "0 0 0 1px rgba(99,102,241,.04), 0 8px 32px rgba(0,0,0,.3)" }}>
+            <div style={{ background: "#0c1220", border: "1px solid #1a2438", borderRadius: 20, padding: "24px 28px 20px", marginBottom: 16 }}>
               <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 24 }}>
                 <div>
-                  <div style={{ fontSize: 10, color: "#334155", letterSpacing: ".1em", textTransform: "uppercase", marginBottom: 10 }}>Prix ETH / USD</div>
-                  <PriceNum value={cur} size={42} />
-                  <div style={{ marginTop: 6, fontFamily: "'DM Mono', monospace", fontSize: 13, color: chartColor, fontWeight: 500 }}>
-                    {isUp ? "▲" : "▼"} {Math.abs(change)}%
+                  <PriceNum value={cur} size={44} />
+                  <div style={{ marginTop: 6, display: "flex", gap: 14, alignItems: "center" }}>
+                    <span style={{ fontFamily: "'DM Mono', monospace", fontSize: 14, color: chartColor, fontWeight: 500 }}>
+                      {isUp ? "▲" : "▼"} {Math.abs(change24h).toFixed(2)}% <span style={{ fontSize: 11, color: "#334155", fontFamily: "'DM Sans', sans-serif" }}>24h</span>
+                    </span>
                   </div>
                 </div>
-                <div style={{ display: "flex", gap: 12 }}>
-                  <div style={{ background: "#070d18", border: "1px solid #111c30", borderRadius: 12, padding: "12px 18px" }}>
-                    <div style={{ fontSize: 10, color: "#334155", letterSpacing: ".08em", textTransform: "uppercase", marginBottom: 6 }}>Volume spike</div>
-                    <div style={{ fontFamily: "'DM Mono', monospace", fontSize: 20, fontWeight: 500, color: volRatio >= 2 ? "#f87171" : volRatio >= 1.5 ? "#fbbf24" : "#34d399" }}>{volRatio.toFixed(2)}×</div>
-                  </div>
-                  <div style={{ background: "#070d18", border: "1px solid #111c30", borderRadius: 12, padding: "12px 18px" }}>
-                    <div style={{ fontSize: 10, color: "#334155", letterSpacing: ".08em", textTransform: "uppercase", marginBottom: 6 }}>Source</div>
-                    <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-                      <div style={{ width: 6, height: 6, borderRadius: "50%", background: backendOk ? "#34d399" : "#f87171", animation: backendOk ? "livepulse 2.5s infinite" : "none" }} />
-                      <span style={{ fontSize: 14, color: backendOk ? "#34d399" : "#f87171", fontWeight: 600 }}>{backendOk ? "Binance" : "Simulation"}</span>
+                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 10 }}>
+                  {[
+                    { l: "Haut 24h",  v: high24h ? `$${high24h.toLocaleString("en-US", { maximumFractionDigits: 0 })}` : "—", c: "#34d399" },
+                    { l: "Bas 24h",   v: low24h  ? `$${low24h.toLocaleString("en-US",  { maximumFractionDigits: 0 })}` : "—", c: "#f87171" },
+                    { l: "Vol (M$)",  v: vol24h  ? `${(vol24h / 1e6).toFixed(0)}M`  : "—", c: "#a5b4fc" },
+                  ].map(s => (
+                    <div key={s.l} style={{ background: "#070d18", border: "1px solid #111c30", borderRadius: 10, padding: "10px 14px" }}>
+                      <div style={{ fontSize: 10, color: "#334155", letterSpacing: ".08em", textTransform: "uppercase", marginBottom: 5 }}>{s.l}</div>
+                      <div style={{ fontFamily: "'DM Mono', monospace", fontSize: 14, fontWeight: 500, color: s.c }}>{s.v}</div>
                     </div>
-                  </div>
+                  ))}
                 </div>
               </div>
-              <Spark data={prices} color={chartColor} h={120} />
+              <Spark data={chartData || []} color={chartColor} h={130} />
+              <div style={{ display: "flex", justifyContent: "space-between", marginTop: 8, fontSize: 10, color: "#1e3a5f" }}>
+                <span>← {klines.length} bougies · intervalle 5 min</span>
+                <span>Maintenant →</span>
+              </div>
             </div>
 
-            <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 14 }}>
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 14 }}>
               {[
-                { l: "News analysées", v: stats.news_analyzed ?? news.length, c: "#a5b4fc", s: "dernières 24h" },
-                { l: "Signaux actifs", v: signals.length, c: "#fbbf24", s: "seuil sentiment ≥ 0.65" },
-                { l: "Précision signaux", v: stats.signal_accuracy != null ? `${stats.signal_accuracy}%` : "—", c: (stats.signal_accuracy || 0) >= 60 ? "#34d399" : "#94a3b8", s: "sur signaux fermés" },
+                { l: "Var. 24h",        v: `${isUp ? "+" : ""}${change24h.toFixed(2)}%`, c: chartColor,   s: "variation prix" },
+                { l: "News analysées", v: stats.news_analyzed ?? news.length,            c: "#a5b4fc",    s: "dernières 24h" },
+                { l: "Signaux actifs", v: signals.length,                                c: "#fbbf24",    s: "seuil ≥ 0.65" },
+                { l: "Précision",      v: stats.signal_accuracy != null ? `${stats.signal_accuracy}%` : "—", c: (stats.signal_accuracy || 0) >= 60 ? "#34d399" : "#94a3b8", s: "signaux fermés" },
               ].map(s => (
                 <div key={s.l} style={{ background: "#0c1220", border: "1px solid #1a2438", borderRadius: 14, padding: "18px 20px" }}>
                   <div style={{ fontSize: 10, color: "#334155", letterSpacing: ".08em", textTransform: "uppercase", marginBottom: 10 }}>{s.l}</div>
-                  <div style={{ fontFamily: "'DM Mono', monospace", fontSize: 24, fontWeight: 500, color: s.c }}>{s.v}</div>
+                  <div style={{ fontFamily: "'DM Mono', monospace", fontSize: 22, fontWeight: 500, color: s.c }}>{s.v}</div>
                   <div style={{ fontSize: 11, color: "#475569", marginTop: 4 }}>{s.s}</div>
                 </div>
               ))}
             </div>
 
             {!backendOk && (
-              <div style={{ marginTop: 16, padding: "14px 18px", borderRadius: 12, background: "rgba(248,113,113,.06)", border: "1px solid rgba(248,113,113,.18)", color: "#f87171", fontSize: 13 }}>
-                ⚠️ Backend hors ligne — lance <code style={{ background: "rgba(248,113,113,.12)", padding: "1px 7px", borderRadius: 5, fontFamily: "'DM Mono', monospace", fontSize: 12 }}>python backend_v3.py</code>
+              <div style={{ marginTop: 16, padding: "14px 18px", borderRadius: 12, background: "rgba(251,191,36,.06)", border: "1px solid rgba(251,191,36,.18)", color: "#fbbf24", fontSize: 13 }}>
+                ℹ️ Backend hors ligne — prix Binance OK mais news/signaux indisponibles. Lance <code style={{ background: "rgba(251,191,36,.1)", padding: "1px 7px", borderRadius: 5, fontFamily: "'DM Mono', monospace", fontSize: 12 }}>python backend_v3.py</code> pour les activer.
               </div>
             )}
           </div>
