@@ -83,7 +83,7 @@ export default function App() {
   return (
     <div style={{ display: "flex", minHeight: "100svh" }}>
       <Toaster position="top-right" theme="dark" richColors />
-      {!isMobile && <Sidebar page={page} setPage={setPage} onLogout={logout} wsConnected={connected} />}
+      {!isMobile && <Sidebar page={page} setPage={setPage} onLogout={logout} wsConnected={connected} hasPrice={!!price} />}
       <main style={{ flex: 1, overflowY: "auto", background: "rgb(6 10 18)", paddingBottom: isMobile ? 64 : 0 }}>
         {pages[page] ?? pages.home}
         {isMobile && <MobileNav page={page} setPage={setPage} />}

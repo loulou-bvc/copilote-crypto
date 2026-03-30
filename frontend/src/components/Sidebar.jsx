@@ -14,7 +14,7 @@ const NAV = [
   { id: "settings",    label: "Réglages",    Icon: Settings     },
 ];
 
-export function Sidebar({ page, setPage, onLogout, wsConnected }) {
+export function Sidebar({ page, setPage, onLogout, wsConnected, hasPrice }) {
   return (
     <aside
       style={{
@@ -40,12 +40,12 @@ export function Sidebar({ page, setPage, onLogout, wsConnected }) {
         <div style={{ marginTop: 8, display: "flex", alignItems: "center", gap: 6 }}>
           <span style={{
             width: 7, height: 7, borderRadius: "50%",
-            background: wsConnected ? "#34d399" : "#475569",
+            background: wsConnected ? "#34d399" : hasPrice ? "#fbbf24" : "#475569",
             display: "inline-block",
             animation: wsConnected ? "livepulse 2s ease-in-out infinite" : "none",
           }} />
-          <span style={{ fontSize: 11, color: "#475569", fontFamily: "'DM Mono', monospace" }}>
-            {wsConnected ? "LIVE" : "offline"}
+          <span style={{ fontSize: 11, color: wsConnected ? "#34d399" : hasPrice ? "#fbbf24" : "#475569", fontFamily: "'DM Mono', monospace" }}>
+            {wsConnected ? "LIVE" : hasPrice ? "connecting…" : "offline"}
           </span>
         </div>
       </div>
