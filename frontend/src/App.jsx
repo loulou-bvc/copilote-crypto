@@ -17,6 +17,9 @@ import { Wallet } from "@/pages/Wallet";
 import { Chat } from "@/pages/Chat";
 import { History } from "@/pages/History";
 import { Backtest } from "@/pages/Backtest";
+import { Settings } from "@/pages/Settings";
+import { Strategy } from "@/pages/Strategy";
+import { Correlations } from "@/pages/Correlations";
 
 export default function App() {
   const { ready, authenticated, logout } = usePrivy();
@@ -30,7 +33,7 @@ export default function App() {
   }, []);
 
   const { price, change24h, high24h, low24h, vol24h, connected } = useBinancePrice();
-  const { closes } = useKlines("5m", 60);
+  const { closes, candles } = useKlines("5m", 60);
   const { news, signals, stats, volRatio, fearGreed, online } = useBackend();
 
   // Alert checking
@@ -70,8 +73,11 @@ export default function App() {
     news:     <News news={news} signals={signals} online={online} />,
     wallet:   <Wallet ethPrice={price} />,
     chat:     <Chat />,
-    history:  <History />,
-    backtest: <Backtest />,
+    history:      <History />,
+    backtest:     <Backtest />,
+    settings:     <Settings />,
+    strategy:     <Strategy candles={candles} />,
+    correlations: <Correlations />,
   };
 
   return (

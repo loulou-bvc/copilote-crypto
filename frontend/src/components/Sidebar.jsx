@@ -1,4 +1,4 @@
-import { Home, BarChart3, Newspaper, Wallet, MessageSquare, LogOut, TrendingUp, History, FlaskConical } from "lucide-react";
+import { Home, BarChart3, Newspaper, Wallet, MessageSquare, LogOut, TrendingUp, History, FlaskConical, Settings, LineChart, Activity } from "lucide-react";
 import { cn } from "@/lib/utils";
 
 const NAV = [
@@ -8,7 +8,10 @@ const NAV = [
   { id: "wallet",  label: "Portefeuille", Icon: Wallet      },
   { id: "chat",    label: "Assistant",  Icon: MessageSquare },
   { id: "history", label: "Historique", Icon: History       },
-  { id: "backtest",label: "Backtest",   Icon: FlaskConical  },
+  { id: "backtest",    label: "Backtest",    Icon: FlaskConical },
+  { id: "strategy",    label: "Stratégie",   Icon: LineChart    },
+  { id: "correlations",label: "Corrélations",Icon: Activity     },
+  { id: "settings",    label: "Réglages",    Icon: Settings     },
 ];
 
 export function Sidebar({ page, setPage, onLogout, wsConnected }) {

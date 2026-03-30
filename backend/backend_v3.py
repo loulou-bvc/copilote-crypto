@@ -750,6 +750,27 @@ class APIServer:
             ok   = llm_engine.switch(data.get("provider", ""))
             return {"ok": ok, "active": llm_engine.active}
 
+        elif path == "/api/config":
+            if method == "POST":
+                cl   = int(headers.get("content-length", 0))
+                body = await reader.read(cl) if cl else b"{}"
+                data = json.loads(body)
+                if "min_sentiment_score" in data:
+                    v = float(data["min_sentiment_score"])
+                    if 0.1 <= v <= 1.0: SIGNAL_CONFIG["min_sentiment_score"] = round(v, 2)
+                if "min_volume_spike" in data:
+                    v = float(data["min_volume_spike"])
+                    if 1.0 <= v <= 5.0: SIGNAL_CONFIG["min_volume_spike"] = round(v, 1)
+                if "min_impact" in data:
+                    v = float(data["min_impact"])
+                    if 1.0 <= v <= 10.0: SIGNAL_CONFIG["min_impact"] = round(v, 1)
+                if "cooldown_seconds" in data:
+                    v = int(data["cooldown_seconds"])
+                    if 60 <= v <= 3600: SIGNAL_CONFIG["cooldown_seconds"] = v
+                return {"ok": True, "config": dict(SIGNAL_CONFIG)}
+            else:
+                return dict(SIGNAL_CONFIG)
+
         # POST /api/analyze  {"title": "...", "source": "..."}
         elif path == "/api/analyze" and method == "POST":
             cl   = int(headers.get("content-length", 0))
