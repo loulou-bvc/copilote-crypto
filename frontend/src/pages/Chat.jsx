@@ -27,13 +27,13 @@ export function Chat() {
     setMessages(m => [...m, { role: "user", content: q }]);
     setLoading(true);
     try {
-      const r = await fetch(`${BACKEND}/api/analyze`, {
+      const r = await fetch(`${BACKEND}/api/chat`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ message: q }),
       });
       const data = await r.json();
-      setMessages(m => [...m, { role: "assistant", content: data.response || data.answer || JSON.stringify(data) }]);
+      setMessages(m => [...m, { role: "assistant", content: data.response ?? data.answer ?? data.signal ?? JSON.stringify(data) }]);
     } catch {
       setMessages(m => [...m, { role: "assistant", content: "⚠ Backend hors ligne. Impossible de répondre pour l'instant." }]);
     }

@@ -760,6 +760,14 @@ class APIServer:
             result = await llm_engine.analyze(news, ctx)
             return result
 
+        # POST /api/chat  {"message": "..."}
+        elif path == "/api/chat" and method == "POST":
+            cl   = int(headers.get("content-length", 0))
+            body = await reader.read(cl) if cl else b"{}"
+            data = json.loads(body)
+            message = data.get("message", "")
+            return await self._handle_chat(message)
+
         # GET /api/feargreed
         elif path == "/api/feargreed":
             return await self._get_feargreed()
@@ -845,6 +853,69 @@ class APIServer:
             "volume_ratio":    market.get_volume_ratio(),
             "llm_active":      llm_engine.active,
         }
+
+    async def _handle_chat(self, message: str) -> dict:
+        try:
+            ticker = await market.fetch_ticker()
+            price  = ticker.get("price") or market.current_price or 0
+
+            # Compute 24h change from price history
+            change_24h = 0.0
+            if len(market.price_history) >= 2:
+                oldest = market.price_history[0][1]
+                if oldest:
+                    change_24h = round((price - oldest) / oldest * 100, 2)
+
+            # Get last signal from DB
+            last_signal_text = "aucun signal récent"
+            try:
+                conn = sqlite3.connect(DB_PATH)
+                c = conn.cursor()
+                c.execute("SELECT direction, confidence FROM signals ORDER BY created_at DESC LIMIT 1")
+                row = c.fetchone()
+                conn.close()
+                if row:
+                    direction, confidence = row
+                    last_signal_text = f"{direction} avec {int(confidence * 100)}% de confiance"
+            except:
+                pass
+
+            system_prompt = (
+                f"Tu es un assistant crypto expert.\n"
+                f"Contexte actuel: ETH/USDT = ${price:,.2f}, variation 24h: {change_24h:+.2f}%.\n"
+                f"Dernier signal: {last_signal_text}.\n"
+                f"Réponds en français, de manière concise et utile."
+            )
+            full_prompt = f"{system_prompt}\n\nQuestion: {message}"
+
+            if not CLAUDE_API_KEY and not GEMINI_API_KEY:
+                return {"response": "Aucune clé LLM configurée. Impossible de répondre."}
+
+            if llm_engine.active == "claude" and CLAUDE_API_KEY:
+                async with aiohttp.ClientSession() as session:
+                    async with session.post(
+                        "https://api.anthropic.com/v1/messages",
+                        headers={"x-api-key": CLAUDE_API_KEY, "anthropic-version": "2023-06-01", "Content-Type": "application/json"},
+                        json={"model": "claude-haiku-4-5-20251001", "max_tokens": 512, "messages": [{"role": "user", "content": full_prompt}]},
+                        timeout=aiohttp.ClientTimeout(total=20)
+                    ) as r:
+                        data = await r.json()
+                        text = data.get("content", [{}])[0].get("text", "")
+                        return {"response": text}
+            else:
+                url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_API_KEY}"
+                payload = {
+                    "contents": [{"parts": [{"text": full_prompt}]}],
+                    "generationConfig": {"maxOutputTokens": 512, "temperature": 0.7},
+                }
+                async with aiohttp.ClientSession() as session:
+                    async with session.post(url, json=payload, timeout=aiohttp.ClientTimeout(total=20)) as r:
+                        data = await r.json()
+                        text = data["candidates"][0]["content"]["parts"][0]["text"]
+                        return {"response": text}
+        except Exception as e:
+            print(f"⚠️ /api/chat: {e}")
+            return {"response": f"Erreur lors de la génération de la réponse: {str(e)}"}
 
     async def _get_feargreed(self) -> dict:
         try:

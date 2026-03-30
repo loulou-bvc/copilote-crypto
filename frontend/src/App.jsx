@@ -8,6 +8,7 @@ import { useKlines } from "@/hooks/useKlines";
 import { useBackend } from "@/hooks/useBackend";
 
 import { Sidebar } from "@/components/Sidebar";
+import { MobileNav } from "@/components/MobileNav";
 import { Login } from "@/pages/Login";
 import { Home } from "@/pages/Home";
 import { Market } from "@/pages/Market";
@@ -20,6 +21,13 @@ import { Backtest } from "@/pages/Backtest";
 export default function App() {
   const { ready, authenticated, logout } = usePrivy();
   const [page, setPage] = useState("home");
+
+  const [isMobile, setIsMobile] = useState(() => typeof window !== "undefined" && window.innerWidth < 768);
+  useEffect(() => {
+    const handler = () => setIsMobile(window.innerWidth < 768);
+    window.addEventListener("resize", handler);
+    return () => window.removeEventListener("resize", handler);
+  }, []);
 
   const { price, change24h, high24h, low24h, vol24h, connected } = useBinancePrice();
   const { closes } = useKlines("5m", 60);
@@ -69,9 +77,10 @@ export default function App() {
   return (
     <div style={{ display: "flex", minHeight: "100svh" }}>
       <Toaster position="top-right" theme="dark" richColors />
-      <Sidebar page={page} setPage={setPage} onLogout={logout} wsConnected={connected} />
-      <main style={{ flex: 1, overflowY: "auto", background: "rgb(6 10 18)" }}>
+      {!isMobile && <Sidebar page={page} setPage={setPage} onLogout={logout} wsConnected={connected} />}
+      <main style={{ flex: 1, overflowY: "auto", background: "rgb(6 10 18)", paddingBottom: isMobile ? 64 : 0 }}>
         {pages[page] ?? pages.home}
+        {isMobile && <MobileNav page={page} setPage={setPage} />}
       </main>
     </div>
   );

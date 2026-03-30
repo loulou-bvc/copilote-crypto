@@ -81,8 +81,8 @@ function SignalCard({ sig }) {
 export function News({ news = [], signals = [], online }) {
   const [tab, setTab] = useState("Tout");
 
-  const filtered = tab === "Signaux" ? [] : news.filter(n =>
-    tab === "Tout" ? true :
+  const filtered = news.filter(n =>
+    tab === "Tout" || tab === "Signaux" ? true :
     tab === "Bullish" ? n.sentiment === "bullish" :
     tab === "Bearish" ? n.sentiment === "bearish" : true
   );
