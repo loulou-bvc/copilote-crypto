@@ -16,6 +16,9 @@ import os
 from datetime import datetime, timezone
 from collections import defaultdict, deque
 from typing import Optional
+from dotenv import load_dotenv
+
+load_dotenv()
 
 # ─── CONFIG — TOUT via variables d'environnement ─────────────────────────────
 # Sur Railway: Settings → Variables
@@ -63,6 +66,7 @@ SOURCE_TRUST = {
 def init_db():
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
+    c.execute("PRAGMA journal_mode=WAL")
     c.execute("""CREATE TABLE IF NOT EXISTS news (
         id TEXT PRIMARY KEY, title TEXT, source TEXT, source_type TEXT, url TEXT,
         sentiment_score REAL, sentiment_label TEXT, sentiment_confidence REAL,
@@ -101,38 +105,42 @@ class MarketEngine:
         self.last_signal_time = {}
 
     async def fetch_ticker(self) -> dict:
-        try:
-            async with aiohttp.ClientSession() as session:
-                # Prix simple
-                async with session.get(
-                    "https://api.binance.com/api/v3/ticker/price",
-                    params={"symbol": "ETHUSDT"},
-                    timeout=aiohttp.ClientTimeout(total=8)
-                ) as r:
-                    data  = await r.json()
-                    price = float(data["price"])
+        for attempt in range(3):
+            try:
+                async with aiohttp.ClientSession() as session:
+                    # Prix simple
+                    async with session.get(
+                        "https://api.binance.com/api/v3/ticker/price",
+                        params={"symbol": "ETHUSDT"},
+                        timeout=aiohttp.ClientTimeout(total=8)
+                    ) as r:
+                        data  = await r.json()
+                        price = float(data["price"])
 
-                # Volume via klines
-                volume = 0.0
-                async with session.get(
-                    "https://api.binance.com/api/v3/klines",
-                    params={"symbol": "ETHUSDT", "interval": "1m", "limit": 2},
-                    timeout=aiohttp.ClientTimeout(total=8)
-                ) as kr:
-                    klines = await kr.json()
-                    if klines and isinstance(klines, list) and len(klines) > 0:
-                        volume = float(klines[-1][5])
-                        self.volume_history.append(volume)
+                    # Volume via klines
+                    volume = 0.0
+                    async with session.get(
+                        "https://api.binance.com/api/v3/klines",
+                        params={"symbol": "ETHUSDT", "interval": "1m", "limit": 2},
+                        timeout=aiohttp.ClientTimeout(total=8)
+                    ) as kr:
+                        klines = await kr.json()
+                        if klines and isinstance(klines, list) and len(klines) > 0:
+                            volume = float(klines[-1][5])
+                            self.volume_history.append(volume)
 
-                self.current_price  = price
-                self.current_volume = volume
-                ts = time.time()
-                self.price_history.append((ts, price))
-                self._store_price(ts, price, volume)
-                return {"price": price, "volume": volume, "timestamp": ts}
-        except Exception as e:
-            print(f"⚠️ Binance ticker: {e}")
-            return {"price": self.current_price, "volume": self.current_volume, "timestamp": time.time()}
+                    self.current_price  = price
+                    self.current_volume = volume
+                    ts = time.time()
+                    self.price_history.append((ts, price))
+                    self._store_price(ts, price, volume)
+                    return {"price": price, "volume": volume, "timestamp": ts}
+            except Exception as e:
+                print(f"⚠️ Binance ticker (attempt {attempt+1}/3): {e}")
+                if attempt < 2:
+                    await asyncio.sleep(2 ** attempt)
+        # Fallback to last known price
+        return {"price": self.current_price, "volume": self.current_volume, "timestamp": time.time()}
 
     def _store_price(self, ts, price, volume):
         try:
@@ -246,7 +254,8 @@ Réponds UNIQUEMENT en JSON strict:
                 ) as r:
                     data = await r.json()
                     txt  = data.get("content", [{}])[0].get("text", "{}")
-                    result = json.loads(txt.replace("```json", "").replace("```", "").strip())
+                    m = re.search(r'\{[^{}]+\}', txt)
+                    result = json.loads(m.group(0)) if m else json.loads(txt.replace("```json", "").replace("```", "").strip())
                     result["provider"] = "claude"
                     self._store_analysis("claude", prompt, result)
                     return result
@@ -269,7 +278,8 @@ Réponds UNIQUEMENT en JSON strict:
                 async with session.post(url, json=payload, timeout=aiohttp.ClientTimeout(total=15)) as r:
                     data = await r.json()
                     txt  = data["candidates"][0]["content"]["parts"][0]["text"]
-                    result = json.loads(txt.replace("```json", "").replace("```", "").strip())
+                    m = re.search(r'\{[^{}]+\}', txt)
+                    result = json.loads(m.group(0)) if m else json.loads(txt.replace("```json", "").replace("```", "").strip())
                     result["provider"] = "gemini"
                     self._store_analysis("gemini", prompt, result)
                     return result
@@ -717,8 +727,8 @@ class APIServer:
             return {**t, "volume_ratio": market.get_volume_ratio()}
 
         # GET /api/signals
-        elif path == "/api/signals":
-            return self._get_signals()
+        elif path.startswith("/api/signals"):
+            return self._get_signals(path)
 
         # GET /api/correlations
         elif path == "/api/correlations":
@@ -750,11 +760,21 @@ class APIServer:
             result = await llm_engine.analyze(news, ctx)
             return result
 
+        # GET /api/feargreed
+        elif path == "/api/feargreed":
+            return await self._get_feargreed()
+
+        # GET /api/backtest?days=30
+        elif path.startswith("/api/backtest"):
+            return self._get_backtest(path)
+
         # GET /health
         elif path == "/health":
             return self._health()
 
         return {"error": "route not found", "path": path}
+
+    VALID_SENTIMENTS = {"bullish", "bearish", "neutral"}
 
     def _get_news(self, path: str) -> list:
         limit, sentiment = 50, None
@@ -762,28 +782,51 @@ class APIServer:
             for p in path.split("?", 1)[1].split("&"):
                 if "=" in p:
                     k, v = p.split("=", 1)
-                    if k == "limit": limit = min(int(v), 200)
-                    elif k == "sentiment": sentiment = v
-        where = "WHERE 1=1" + (f" AND sentiment_label='{sentiment}'" if sentiment else "")
+                    if k == "limit":
+                        try: limit = min(int(v), 200)
+                        except: pass
+                    elif k == "sentiment":
+                        if v in self.VALID_SENTIMENTS:
+                            sentiment = v
         conn = sqlite3.connect(DB_PATH)
         c = conn.cursor()
-        c.execute(f"""SELECT id,title,source,source_type,sentiment_label,sentiment_score,
-                     sentiment_confidence,impact_score,social_score,assets,
-                     price_at_time,volume_ratio,move_5min,move_15min,move_1h,
-                     signal_emitted,published_at FROM news {where} ORDER BY published_at DESC LIMIT {limit}""")
+        if sentiment:
+            c.execute("""SELECT id,title,source,source_type,sentiment_label,sentiment_score,
+                         sentiment_confidence,impact_score,social_score,assets,
+                         price_at_time,volume_ratio,move_5min,move_15min,move_1h,
+                         signal_emitted,published_at FROM news WHERE sentiment_label=?
+                         ORDER BY published_at DESC LIMIT ?""", (sentiment, limit))
+        else:
+            c.execute("""SELECT id,title,source,source_type,sentiment_label,sentiment_score,
+                         sentiment_confidence,impact_score,social_score,assets,
+                         price_at_time,volume_ratio,move_5min,move_15min,move_1h,
+                         signal_emitted,published_at FROM news
+                         ORDER BY published_at DESC LIMIT ?""", (limit,))
         rows = c.fetchall()
         conn.close()
         return [{"id":r[0],"title":r[1],"source":r[2],"source_type":r[3],"sentiment":r[4],"score":r[5],"confidence":r[6],"impact":r[7],"social_score":r[8],"assets":json.loads(r[9] or "[]"),"price":r[10],"volume_ratio":r[11],"move_5min":r[12],"move_15min":r[13],"move_1h":r[14],"signal":bool(r[15]),"timestamp":r[16]} for r in rows]
 
-    def _get_signals(self) -> list:
+    def _get_signals(self, path: str = "/api/signals") -> list:
+        limit = 50
+        if "?" in path:
+            for p in path.split("?", 1)[1].split("&"):
+                if "=" in p:
+                    k, v = p.split("=", 1)
+                    if k == "limit":
+                        try: limit = min(int(v), 200)
+                        except: pass
         conn = sqlite3.connect(DB_PATH)
         c = conn.cursor()
         c.execute("""SELECT s.id,s.direction,s.confidence,s.sentiment_score,s.volume_ratio,
-                     s.price_at_signal,s.result_15min,s.correct_15min,s.created_at,n.title,n.source
-                     FROM signals s LEFT JOIN news n ON s.news_id=n.id ORDER BY s.created_at DESC LIMIT 50""")
+                     s.price_at_signal,s.result_15min,s.correct_15min,s.created_at,n.title,n.source,
+                     s.result_1h,s.correct_1h
+                     FROM signals s LEFT JOIN news n ON s.news_id=n.id ORDER BY s.created_at DESC LIMIT ?""", (limit,))
         rows = c.fetchall()
         conn.close()
-        return [{"id":r[0],"direction":r[1],"confidence":r[2],"sentiment":r[3],"volume_ratio":r[4],"price":r[5],"result_15min":r[6],"correct":r[7],"timestamp":r[8],"news_title":r[9],"source":r[10]} for r in rows]
+        return [{"id":r[0],"direction":r[1],"confidence":r[2],"sentiment":r[3],"volume_ratio":r[4],
+                 "price_at_signal":r[5],"result_15min":r[6],"correct_15min":r[7],"created_at":r[8],
+                 "news_title":r[9],"source":r[10],"result_1h":r[11],"correct_1h":r[12],
+                 "reasoning": r[9] or ""} for r in rows]
 
     def _get_stats(self) -> dict:
         conn = sqlite3.connect(DB_PATH)
@@ -801,6 +844,78 @@ class APIServer:
             "eth_price":       market.current_price,
             "volume_ratio":    market.get_volume_ratio(),
             "llm_active":      llm_engine.active,
+        }
+
+    async def _get_feargreed(self) -> dict:
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(
+                    "https://api.alternative.me/fng/?limit=7",
+                    timeout=aiohttp.ClientTimeout(total=8)
+                ) as r:
+                    return await r.json()
+        except Exception as e:
+            print(f"⚠️ FearGreed: {e}")
+            return {"error": str(e)}
+
+    def _get_backtest(self, path: str) -> dict:
+        days = 30
+        if "?" in path:
+            for p in path.split("?", 1)[1].split("&"):
+                if "=" in p:
+                    k, v = p.split("=", 1)
+                    if k == "days":
+                        try: days = min(int(v), 365)
+                        except: pass
+        since = time.time() - days * 86400
+        conn = sqlite3.connect(DB_PATH)
+        c = conn.cursor()
+        c.execute("""SELECT direction, confidence, price_at_signal, result_15min, correct_15min,
+                     result_1h, correct_1h, created_at
+                     FROM signals WHERE created_at > ? ORDER BY created_at ASC""", (since,))
+        rows = c.fetchall()
+        conn.close()
+
+        if not rows:
+            return {"total": 0, "win_rate_15min": None, "win_rate_1h": None, "avg_pnl": None,
+                    "capital_curve": [], "by_confidence": []}
+
+        total = len(rows)
+        evaluated_15 = [(r[4], r[3]) for r in rows if r[4] is not None]
+        evaluated_1h = [(r[6], r[5]) for r in rows if r[6] is not None]
+
+        win_rate_15 = sum(1 for c, _ in evaluated_15 if c == 1) / len(evaluated_15) if evaluated_15 else None
+        win_rate_1h = sum(1 for c, _ in evaluated_1h if c == 1) / len(evaluated_1h) if evaluated_1h else None
+        avg_pnl     = sum(p for _, p in evaluated_15 if p is not None) / len(evaluated_15) if evaluated_15 else None
+
+        # Capital curve (hypothetical, 1 ETH per signal)
+        capital = 1.0
+        curve   = [capital]
+        for row in rows:
+            pnl = row[3]  # result_15min
+            if pnl is not None:
+                capital *= (1 + pnl / 100)
+                curve.append(round(capital, 6))
+
+        # By confidence bucket
+        buckets = [(50, 60), (60, 70), (70, 80), (80, 90), (90, 101)]
+        by_conf = []
+        for lo, hi in buckets:
+            b_rows = [r for r in rows if lo <= (r[1] * 100 if r[1] <= 1 else r[1]) < hi and r[4] is not None]
+            if b_rows:
+                wr = sum(1 for r in b_rows if r[4] == 1) / len(b_rows)
+                pnl_vals = [r[3] for r in b_rows if r[3] is not None]
+                avg = sum(pnl_vals) / len(pnl_vals) if pnl_vals else 0
+                by_conf.append({"range": f"{lo}-{hi}%", "win_rate": round(wr, 3), "avg_pnl": round(avg, 3), "count": len(b_rows)})
+
+        return {
+            "total":          total,
+            "win_rate_15min": round(win_rate_15, 3) if win_rate_15 is not None else None,
+            "win_rate_1h":    round(win_rate_1h, 3) if win_rate_1h is not None else None,
+            "avg_pnl":        round(avg_pnl, 3) if avg_pnl is not None else None,
+            "capital_curve":  curve,
+            "by_confidence":  by_conf,
+            "days":           days,
         }
 
     def _health(self) -> dict:
@@ -881,6 +996,17 @@ async def main():
     print("╚══════════════════════════════════════════╝\n")
 
     init_db()
+
+    # Charge les seen_ids depuis la DB pour éviter les doublons au redémarrage
+    try:
+        _conn = sqlite3.connect(DB_PATH)
+        _c = _conn.cursor()
+        _c.execute("SELECT id FROM news ORDER BY created_at DESC LIMIT 500")
+        news_fetcher.seen_ids = {row[0] for row in _c.fetchall()}
+        _conn.close()
+        print(f"🔄 seen_ids chargés: {len(news_fetcher.seen_ids)} entrées")
+    except Exception as e:
+        print(f"⚠️ Chargement seen_ids: {e}")
 
     # Vérifie les clés
     print("🔑 Clés API:")
