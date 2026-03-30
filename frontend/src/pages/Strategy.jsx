@@ -131,6 +131,11 @@ export function Strategy({ candles }) {
       {/* ── AVANT ── */}
       {tab === "Avant" && (
         <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+          {/* Help banner */}
+          <div style={{ background: "rgba(99,102,241,0.06)", border: "1px solid rgba(99,102,241,0.15)", borderRadius: 10, padding: "12px 14px", fontSize: 12, color: "#64748b", lineHeight: 1.6 }}>
+            <strong style={{ color: "#818cf8" }}>Avant d'ouvrir une position</strong> — Analyse les conditions de marché.
+            Un score &gt; 65 = conditions favorables. Vérifie la checklist avant de trader.
+          </div>
           {/* Conviction gauge */}
           <div style={{
             background: "rgba(12,18,32,0.9)", border: "1px solid rgba(255,255,255,0.06)",
@@ -308,6 +313,11 @@ export function Strategy({ candles }) {
           ) : (
             /* Open position form */
             <div style={{ background: "rgba(12,18,32,0.9)", border: "1px solid rgba(255,255,255,0.06)", borderRadius: 14, padding: 24 }}>
+              {/* Paper Trading badge */}
+              <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 16 }}>
+                <span style={{ padding: "3px 10px", background: "rgba(251,191,36,0.12)", border: "1px solid rgba(251,191,36,0.25)", borderRadius: 20, fontSize: 11, fontWeight: 700, color: "#fbbf24", letterSpacing: 1 }}>🧪 PAPER TRADING</span>
+                <span style={{ fontSize: 12, color: "#475569" }}>Simulation sans argent réel — les trades sont sauvegardés localement</span>
+              </div>
               <div style={{ fontSize: 14, fontWeight: 600, color: "#f1f5f9", marginBottom: 20 }}>Ouvrir une position (paper trading)</div>
 
               {/* Long / Short */}
@@ -413,16 +423,24 @@ export function Strategy({ candles }) {
             </div>
           )}
 
+          {/* Empty state */}
+          {history.length === 0 && (
+            <div style={{ background: "rgba(12,18,32,0.9)", border: "1px solid rgba(255,255,255,0.06)", borderRadius: 12, padding: 32, textAlign: "center" }}>
+              <div style={{ fontSize: 32, marginBottom: 12 }}>📋</div>
+              <div style={{ fontSize: 14, color: "#94a3b8", marginBottom: 8 }}>Aucun trade fermé</div>
+              <div style={{ fontSize: 13, color: "#475569", lineHeight: 1.6 }}>
+                Ouvre une position dans l'onglet <strong style={{ color: "#818cf8" }}>Pendant</strong>,
+                puis ferme-la pour voir tes performances apparaître ici.
+              </div>
+            </div>
+          )}
+
           {/* Trade history table */}
           <div style={{ background: "rgba(12,18,32,0.9)", border: "1px solid rgba(255,255,255,0.06)", borderRadius: 12, overflow: "hidden" }}>
             <div style={{ display: "grid", gridTemplateColumns: "1fr 60px 80px 80px 80px 70px", padding: "10px 16px", borderBottom: "1px solid rgba(255,255,255,0.06)", fontSize: 11, color: "#475569" }}>
               <span>DATE</span><span>TYPE</span><span>ENTRÉE</span><span>SORTIE</span><span>P&L</span><span>DURÉE</span>
             </div>
-            {history.length === 0 ? (
-              <div style={{ textAlign: "center", padding: "32px 0", color: "#334155", fontSize: 13 }}>
-                Aucun trade fermé pour l'instant
-              </div>
-            ) : (
+            {history.length === 0 ? null : (
               history.map((t, i) => (
                 <div key={i} style={{
                   display: "grid", gridTemplateColumns: "1fr 60px 80px 80px 80px 70px",

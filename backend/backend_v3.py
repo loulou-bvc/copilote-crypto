@@ -37,9 +37,9 @@ DEFAULT_LLM      = os.environ.get("DEFAULT_LLM", "claude")  # "claude" ou "gemin
 
 # ─── SIGNAL CONFIG ────────────────────────────────────────────────────────────
 SIGNAL_CONFIG = {
-    "min_sentiment_score": 0.65,
-    "min_volume_spike":    1.5,
-    "min_impact":          6.0,
+    "min_sentiment_score": 0.55,   # lowered from 0.65 — more permissive when Binance unavailable
+    "min_volume_spike":    1.0,    # lowered from 1.5 — volume_ratio defaults to 1.0 when Binance fails
+    "min_impact":          5.0,    # lowered from 6.0 — allow more signals to be generated
     "cooldown_seconds":    300,
 }
 
